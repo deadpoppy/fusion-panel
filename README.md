@@ -57,6 +57,9 @@ server:
   host: 127.0.0.1
   port: 8082
   request_timeout_seconds: 480
+  public_base_url: null
+  model_name: fusion-panel
+  client_api_key: fusion-panel
 
 fusion:
   enabled_by_default: true
@@ -96,11 +99,26 @@ optional `organization`, optional `extra_headers`, and optional `extra_body`.
 
 `config.yaml` is ignored by git so local keys stay local.
 
+On startup, Fusion Panel prints the values users usually need to copy into an
+OpenAI-compatible client:
+
+```text
+Copy into any OpenAI-compatible client:
+  base_url: http://127.0.0.1:8082/v1
+  api_key: fusion-panel
+  model: fusion-panel
+```
+
+`server.client_api_key` protects the local proxy. Set it to an empty string to
+disable client authentication. `server.public_base_url` is useful when the
+proxy is exposed through a tunnel, reverse proxy, or remote host.
+
 ## Request
 
 ```bash
 curl http://127.0.0.1:8082/v1/chat/completions \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer fusion-panel" \
   -d @examples/request.json
 ```
 
@@ -111,6 +129,7 @@ ready.
 ```bash
 curl -N http://127.0.0.1:8082/v1/chat/completions \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer fusion-panel" \
   -d '{
     "model": "fusion-panel",
     "stream": true,

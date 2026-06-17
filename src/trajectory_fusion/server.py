@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import Mapping
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -44,6 +45,8 @@ async def health() -> dict[str, Any]:
 
 @app.get("/fusion/stats")
 async def fusion_stats(request: Request) -> dict[str, Any]:
+    config: AppConfig = request.app.state.config
+    require_client_api_key(request, config)
     engine: FusionEngine = request.app.state.engine
     return await engine.record_stats()
 
@@ -57,13 +60,14 @@ async def chat_completions(request: Request):
 
     config: AppConfig = request.app.state.config
     engine: FusionEngine = request.app.state.engine
+    require_client_api_key(request, config)
 
     stream = bool(payload.get("stream", False))
     fusion_enabled = bool(payload.get("fusion", config.fusion.enabled_by_default))
     include_debug = bool(
         payload.get("include_fusion_debug", config.fusion.include_debug_in_response)
     )
-    response_model = payload.get("model") or config.models.primary.model_name
+    response_model = payload.get("model") or config.server.model_name
 
     async def resolve_result():
         try:
@@ -118,7 +122,65 @@ async def chat_completions(request: Request):
 def build_app(config: AppConfig) -> FastAPI:
     state.config = config
     state.engine = FusionEngine(config)
+    app.state.config = state.config
+    app.state.engine = state.engine
     return app
+
+
+def require_client_api_key(request: Request, config: AppConfig) -> None:
+    expected = config.server.client_api_key
+    if not expected:
+        return
+    supplied = client_api_key_from_headers(request.headers)
+    if supplied != expected:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid Fusion Panel API key",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+
+def client_api_key_from_headers(headers: Mapping[str, str]) -> str | None:
+    authorization = headers.get("authorization") or headers.get("Authorization")
+    if authorization:
+        scheme, _, token = authorization.partition(" ")
+        if scheme.lower() == "bearer" and token:
+            return token.strip()
+    return headers.get("x-api-key") or headers.get("X-API-Key")
+
+
+def startup_usage_text(config: AppConfig, *, host: str, port: int) -> str:
+    base_url = public_base_url(config, host=host, port=port)
+    chat_url = base_url.rstrip("/") + "/chat/completions"
+    api_key = config.server.client_api_key or "not-required"
+    auth_note = "required" if config.server.client_api_key else "disabled"
+    return "\n".join(
+        [
+            "",
+            "Fusion Panel is ready.",
+            "",
+            "Copy into any OpenAI-compatible client:",
+            f"  base_url: {base_url}",
+            f"  api_key: {api_key}",
+            f"  model: {config.server.model_name}",
+            "",
+            "Direct endpoint:",
+            f"  {chat_url}",
+            "",
+            f"Client auth: {auth_note}",
+            "",
+        ]
+    )
+
+
+def public_base_url(config: AppConfig, *, host: str, port: int) -> str:
+    if config.server.public_base_url:
+        base = config.server.public_base_url.rstrip("/")
+        return base if base.endswith("/v1") else base + "/v1"
+    display_host = "127.0.0.1" if host in {"0.0.0.0", "::"} else host
+    if ":" in display_host and not display_host.startswith("["):
+        display_host = f"[{display_host}]"
+    return f"http://{display_host}:{port}/v1"
 
 
 def main() -> None:
@@ -130,10 +192,13 @@ def main() -> None:
 
     config = load_config(args.config)
     build_app(config)
+    host = args.host or config.server.host
+    port = args.port or config.server.port
+    print(startup_usage_text(config, host=host, port=port), flush=True)
     uvicorn.run(
         app,
-        host=args.host or config.server.host,
-        port=args.port or config.server.port,
+        host=host,
+        port=port,
         reload=False,
     )
 

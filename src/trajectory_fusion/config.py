@@ -32,6 +32,9 @@ class ServerConfig(BaseModel):
     host: str = "127.0.0.1"
     port: int = 8082
     request_timeout_seconds: float = 180
+    public_base_url: str | None = None
+    model_name: str = "fusion-panel"
+    client_api_key: str = "fusion-panel"
 
 
 class FusionConfig(BaseModel):

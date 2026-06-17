@@ -18,6 +18,7 @@ from trajectory_fusion.json_utils import parse_text_decision
 from trajectory_fusion.openai_client import ModelResult
 from trajectory_fusion.prompts import JUDGE_SYSTEM_PROMPT, build_judge_messages
 from trajectory_fusion.responses import delayed_stream_response_with_heartbeat
+from trajectory_fusion.server import client_api_key_from_headers, startup_usage_text
 from trajectory_fusion.tools import apply_hybrid_judge_update, strip_reasoning_text
 
 
@@ -154,6 +155,13 @@ async def main() -> None:
                 },
             }
         )
+        startup_text = startup_usage_text(config, host="0.0.0.0", port=8082)
+        assert "base_url: http://127.0.0.1:8082/v1" in startup_text
+        assert "api_key: fusion-panel" in startup_text
+        assert "model: fusion-panel" in startup_text
+        assert client_api_key_from_headers({"authorization": "Bearer fusion-panel"}) == "fusion-panel"
+        assert client_api_key_from_headers({"x-api-key": "fusion-panel"}) == "fusion-panel"
+
         engine = FusionEngine(config)
         result = await engine.run(
             {

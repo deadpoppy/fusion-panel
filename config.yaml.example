@@ -2,6 +2,9 @@ server:
   host: 127.0.0.1
   port: 8082
   request_timeout_seconds: 480
+  public_base_url: null
+  model_name: fusion-panel
+  client_api_key: fusion-panel
 
 fusion:
   enabled_by_default: true
