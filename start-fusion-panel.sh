@@ -7,8 +7,8 @@ PYTHON="${PYTHON:-python3}"
 CONFIG="${FUSION_CONFIG:-config.yaml}"
 
 if [ ! -f "$CONFIG" ]; then
-  cp config.example.yaml "$CONFIG"
-  echo "Created $CONFIG. Fill in your model endpoints and API keys, then run ./start-fusion-panel.sh again."
+  cp config.yaml.example "$CONFIG"
+  echo "Created $CONFIG. Fill in your model API keys, then run ./start-fusion-panel.sh again."
   exit 1
 fi
 

@@ -1,0 +1,38 @@
+server:
+  host: 127.0.0.1
+  port: 8082
+  request_timeout_seconds: 480
+
+fusion:
+  enabled_by_default: true
+  delayed_streaming: true
+  include_debug_in_response: false
+  expose_debug_headers: true
+  max_panel_concurrency: 8
+  panel_timeout_seconds: 480
+  judge_timeout_seconds: 480
+  fallback_to_primary_on_failure: true
+  debug_dump_dir: fusion-dumps
+  record_dir: fusion-records
+
+models:
+  primary:
+    url: https://open.bigmodel.cn/api/coding/paas/v4
+    api_key: ""
+    model_name: glm-5.2
+  aux:
+    - name: aux-mini-a
+      url: https://api.minimaxi.com/v1
+      api_key: ""
+      model_name: MiniMax-M2.7
+      temperature: 0.7
+    - name: aux-mini-b
+      url: https://api.minimaxi.com/v1
+      api_key: ""
+      model_name: MiniMax-M3
+      temperature: 0.8
+  judge:
+    url: https://api.minimaxi.com/v1
+    api_key: ""
+    model_name: MiniMax-M3
+    temperature: 0.3

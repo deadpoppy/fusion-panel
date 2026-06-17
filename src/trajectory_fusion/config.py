@@ -30,7 +30,7 @@ def expand_env(value: Any) -> Any:
 
 class ServerConfig(BaseModel):
     host: str = "127.0.0.1"
-    port: int = 8080
+    port: int = 8082
     request_timeout_seconds: float = 180
 
 
@@ -86,7 +86,7 @@ def load_config(path: str | Path | None = None) -> AppConfig:
     load_dotenv()
     config_path = Path(path or os.environ.get("FUSION_CONFIG", "config.yaml"))
     if not config_path.exists():
-        example = Path("config.example.yaml")
+        example = Path("config.yaml.example")
         hint = f" Copy {example} to {config_path} and edit model url/api_key/model_name values." if example.exists() else ""
         raise FileNotFoundError(f"Config file not found: {config_path}.{hint}")
     raw = yaml.safe_load(config_path.read_text()) or {}
