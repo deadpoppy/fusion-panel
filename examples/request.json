@@ -1,0 +1,11 @@
+{
+  "model": "fusion-panel",
+  "stream": false,
+  "include_fusion_debug": true,
+  "messages": [
+    {
+      "role": "user",
+      "content": "Compare SQLite and Postgres for a small SaaS app. Give a practical recommendation."
+    }
+  ]
+}
