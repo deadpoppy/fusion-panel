@@ -11,6 +11,7 @@ The server exposes:
 
 ```text
 POST http://127.0.0.1:8082/v1/chat/completions
+GET  http://127.0.0.1:8082/v1/models
 GET  http://127.0.0.1:8082/health
 GET  http://127.0.0.1:8082/fusion/stats
 ```
@@ -58,7 +59,7 @@ server:
   port: 8082
   request_timeout_seconds: 480
   public_base_url: null
-  model_name: fusion-panel
+  model_name: glus
   client_api_key: fusion-panel
 
 fusion:
@@ -66,6 +67,7 @@ fusion:
   delayed_streaming: true
   panel_timeout_seconds: 480
   judge_timeout_seconds: 480
+  aux_timeout_primary_multiplier: 2.0
   debug_dump_dir: fusion-dumps
   record_dir: fusion-records
 
@@ -97,6 +99,15 @@ optional `organization`, optional `extra_headers`, and optional `extra_body`.
 `url` can be either a base URL such as `https://api.openai.com/v1` or a full
 `.../chat/completions` endpoint.
 
+The public Fusion model inherits model metadata and usage from the primary
+model. `GET /v1/models` fetches the primary model card from the primary
+OpenAI-compatible model endpoint, returns the same metadata, and maps only the
+public `id` to `glus`. If the primary endpoint does not expose model metadata,
+Fusion Panel returns a 502 instead of inventing fallback limits. Standard chat
+`usage` and streaming usage chunks report only the primary model usage. Internal
+panel cost is still available under the non-standard `fusion.usage` field in
+non-streaming responses and debug records.
+
 `config.yaml` is ignored by git so local keys stay local.
 
 On startup, Fusion Panel prints the values users usually need to copy into an
@@ -106,7 +117,7 @@ OpenAI-compatible client:
 Copy into any OpenAI-compatible client:
   base_url: http://127.0.0.1:8082/v1
   api_key: fusion-panel
-  model: fusion-panel
+  model: glus
 ```
 
 `server.client_api_key` protects the local proxy. Set it to an empty string to
@@ -131,13 +142,22 @@ curl -N http://127.0.0.1:8082/v1/chat/completions \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer fusion-panel" \
   -d '{
-    "model": "fusion-panel",
+    "model": "glus",
     "stream": true,
+    "stream_options": {"include_usage": true},
     "messages": [
       {"role": "user", "content": "Draft a migration plan from SQLite to Postgres."}
     ]
   }'
 ```
+
+Streaming returns a final OpenAI-compatible usage chunk before `[DONE]` by
+default. Set `"stream_options": {"include_usage": false}` to suppress it.
+
+Auxiliary model calls run in parallel with the primary. After the primary
+returns, Fusion Panel waits only until the total auxiliary wait reaches
+`aux_timeout_primary_multiplier * primary_elapsed`; slower auxiliary calls are
+cancelled and the response falls back to the usable trajectories.
 
 Per-request options:
 

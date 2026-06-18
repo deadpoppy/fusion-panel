@@ -33,7 +33,7 @@ class ServerConfig(BaseModel):
     port: int = 8082
     request_timeout_seconds: float = 180
     public_base_url: str | None = None
-    model_name: str = "fusion-panel"
+    model_name: str = "glus"
     client_api_key: str = "fusion-panel"
 
 
@@ -48,6 +48,7 @@ class FusionConfig(BaseModel):
     max_panel_concurrency: int = 8
     panel_timeout_seconds: float = 90
     judge_timeout_seconds: float = 90
+    aux_timeout_primary_multiplier: float = 2.0
     fallback_to_primary_on_failure: bool = True
 
 

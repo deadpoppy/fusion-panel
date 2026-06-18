@@ -53,14 +53,7 @@ class OpenAICompatibleClient:
     ) -> ModelResult:
         url = self._chat_completions_url(self.model_config.url)
         body = self._build_body(self.model_config, payload)
-        headers = {
-            "Content-Type": "application/json",
-            **self.model_config.extra_headers,
-        }
-        if self.model_config.api_key:
-            headers["Authorization"] = f"Bearer {self.model_config.api_key}"
-        if self.model_config.organization:
-            headers["OpenAI-Organization"] = self.model_config.organization
+        headers = self._headers(content_type="application/json")
 
         start = time.perf_counter()
         async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
@@ -98,11 +91,83 @@ class OpenAICompatibleClient:
             usage=data.get("usage"),
         )
 
+    async def model_card(self) -> dict[str, Any] | None:
+        base_url = self._api_base_url(self.model_config.url)
+        headers = self._headers()
+        async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
+            direct = await self._get_json(
+                client,
+                f"{base_url}/models/{self.model_config.model_name}",
+                headers=headers,
+            )
+            if self._is_model_card(direct):
+                return direct
+
+            listing = await self._get_json(
+                client,
+                f"{base_url}/models",
+                headers=headers,
+            )
+            if isinstance(listing, dict):
+                models = listing.get("data")
+                if isinstance(models, list):
+                    for item in models:
+                        if (
+                            self._is_model_card(item)
+                            and item.get("id") == self.model_config.model_name
+                        ):
+                            return item
+        return None
+
     def _chat_completions_url(self, url: str) -> str:
         stripped = url.rstrip("/")
         if stripped.endswith("/chat/completions"):
             return stripped
         return stripped + "/chat/completions"
+
+    def _api_base_url(self, url: str) -> str:
+        stripped = url.rstrip("/")
+        for suffix in ("/chat/completions", "/responses", "/completions"):
+            if stripped.endswith(suffix):
+                return stripped[: -len(suffix)]
+        return stripped
+
+    def _headers(self, *, content_type: str | None = None) -> dict[str, str]:
+        headers = dict(self.model_config.extra_headers)
+        if content_type:
+            headers["Content-Type"] = content_type
+        if self.model_config.api_key:
+            headers["Authorization"] = f"Bearer {self.model_config.api_key}"
+        if self.model_config.organization:
+            headers["OpenAI-Organization"] = self.model_config.organization
+        return headers
+
+    async def _get_json(
+        self,
+        client: httpx.AsyncClient,
+        url: str,
+        *,
+        headers: dict[str, str],
+    ) -> dict[str, Any] | None:
+        try:
+            response = await client.get(url, headers=headers)
+        except httpx.HTTPError:
+            return None
+        if response.status_code >= 400:
+            return None
+        try:
+            data = response.json()
+        except ValueError:
+            return None
+        return data if isinstance(data, dict) else None
+
+    def _is_model_card(self, data: Any) -> bool:
+        return (
+            isinstance(data, dict)
+            and isinstance(data.get("id"), str)
+            and data.get("object") != "error"
+            and "error" not in data
+        )
 
     def _build_body(self, model_config: BaseModelConfig, payload: dict[str, Any]) -> dict[str, Any]:
         passthrough_keys = {

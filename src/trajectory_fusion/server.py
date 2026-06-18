@@ -11,6 +11,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from .config import AppConfig, load_config
 from .engine import FusionEngine
+from .openai_client import OpenAICompatibleClient
 from .responses import (
     chat_completion_response,
     delayed_stream_response_with_heartbeat,
@@ -51,6 +52,25 @@ async def fusion_stats(request: Request) -> dict[str, Any]:
     return await engine.record_stats()
 
 
+@app.get("/v1/models")
+async def list_models(request: Request) -> dict[str, Any]:
+    config: AppConfig = request.app.state.config
+    require_client_api_key(request, config)
+    return {
+        "object": "list",
+        "data": [await model_card(config)],
+    }
+
+
+@app.get("/v1/models/{model_id}")
+async def retrieve_model(model_id: str, request: Request) -> dict[str, Any]:
+    config: AppConfig = request.app.state.config
+    require_client_api_key(request, config)
+    if model_id != config.server.model_name:
+        raise HTTPException(status_code=404, detail=f"Model not found: {model_id}")
+    return await model_card(config)
+
+
 @app.post("/v1/chat/completions")
 async def chat_completions(request: Request):
     try:
@@ -68,6 +88,7 @@ async def chat_completions(request: Request):
         payload.get("include_fusion_debug", config.fusion.include_debug_in_response)
     )
     response_model = payload.get("model") or config.server.model_name
+    include_stream_usage = stream_include_usage(payload)
 
     async def resolve_result():
         try:
@@ -91,6 +112,7 @@ async def chat_completions(request: Request):
                 resolve_result(),
                 model=response_model,
                 heartbeat_seconds=config.fusion.stream_heartbeat_seconds,
+                include_usage=include_stream_usage,
             ),
             media_type="text/event-stream",
             headers={
@@ -117,6 +139,34 @@ async def chat_completions(request: Request):
         ),
         headers=headers,
     )
+
+
+async def model_card(config: AppConfig) -> dict[str, Any]:
+    upstream_card = await primary_model_card(config)
+    if upstream_card is None:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Primary model metadata not found: {config.models.primary.model_name}",
+        )
+    card = dict(upstream_card)
+    card["id"] = config.server.model_name
+    card.setdefault("object", "model")
+    return card
+
+
+async def primary_model_card(config: AppConfig) -> dict[str, Any] | None:
+    client = OpenAICompatibleClient(
+        config.models.primary,
+        timeout_seconds=min(config.server.request_timeout_seconds, 10),
+    )
+    return await client.model_card()
+
+
+def stream_include_usage(payload: dict[str, Any]) -> bool:
+    stream_options = payload.get("stream_options")
+    if isinstance(stream_options, dict) and "include_usage" in stream_options:
+        return bool(stream_options["include_usage"])
+    return True
 
 
 def build_app(config: AppConfig) -> FastAPI:

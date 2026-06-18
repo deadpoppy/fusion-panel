@@ -42,7 +42,16 @@ def chat_completion_response(
             "degraded": result.degraded,
             "optimized": result.optimized,
             "errors": result.errors or [],
+            "usage": result.fusion_usage,
         },
+    }
+
+
+def usage_payload(result: FusionResult) -> dict[str, int]:
+    return {
+        "prompt_tokens": result.usage.get("prompt_tokens", 0),
+        "completion_tokens": result.usage.get("completion_tokens", 0),
+        "total_tokens": result.usage.get("total_tokens", 0),
     }
 
 
@@ -50,6 +59,7 @@ async def delayed_stream_response(
     result: FusionResult,
     *,
     model: str,
+    include_usage: bool = True,
 ) -> AsyncIterator[str]:
     stream_id = completion_id()
     created = int(time.time())
@@ -129,6 +139,17 @@ async def delayed_stream_response(
             ],
         }
     )
+    if include_usage:
+        yield _sse(
+            {
+                "id": stream_id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": model,
+                "choices": [],
+                "usage": usage_payload(result),
+            }
+        )
     yield "data: [DONE]\n\n"
 
 
@@ -137,6 +158,7 @@ async def delayed_stream_response_with_heartbeat(
     *,
     model: str,
     heartbeat_seconds: float,
+    include_usage: bool = True,
 ) -> AsyncIterator[str]:
     task = asyncio.ensure_future(result_future)
     interval = max(0.1, heartbeat_seconds)
@@ -152,7 +174,11 @@ async def delayed_stream_response_with_heartbeat(
         else:
             result = await task
 
-        async for chunk in delayed_stream_response(result, model=model):
+        async for chunk in delayed_stream_response(
+            result,
+            model=model,
+            include_usage=include_usage,
+        ):
             yield chunk
     finally:
         if not task.done():

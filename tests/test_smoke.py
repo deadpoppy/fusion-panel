@@ -18,7 +18,11 @@ from trajectory_fusion.json_utils import parse_text_decision
 from trajectory_fusion.openai_client import ModelResult
 from trajectory_fusion.prompts import JUDGE_SYSTEM_PROMPT, build_judge_messages
 from trajectory_fusion.responses import delayed_stream_response_with_heartbeat
-from trajectory_fusion.server import client_api_key_from_headers, startup_usage_text
+from trajectory_fusion.server import (
+    build_app,
+    client_api_key_from_headers,
+    startup_usage_text,
+)
 from trajectory_fusion.tools import apply_hybrid_judge_update, strip_reasoning_text
 
 
@@ -27,11 +31,47 @@ def upstream_app() -> FastAPI:
     calls: dict[str, int] = {}
     app.state.calls = calls
 
+    @app.get("/v1/models/{model_id}")
+    async def model(model_id: str) -> dict[str, Any]:
+        if model_id == "glm-5.2":
+            return {
+                "id": "glm-5.2",
+                "object": "model",
+                "created": 123,
+                "owned_by": "primary-owner",
+                "context_window": 262144,
+                "context_length": 262144,
+                "max_context_tokens": 262144,
+                "max_output_tokens": 65536,
+                "supports_tools": True,
+                "supports_reasoning": True,
+            }
+        return {"error": {"message": "not found"}}
+
+    @app.get("/v1/models")
+    async def models() -> dict[str, Any]:
+        return {
+            "object": "list",
+            "data": [
+                {
+                    "id": "primary",
+                    "object": "model",
+                    "created": 123,
+                    "owned_by": "primary-owner",
+                    "context_window": 262144,
+                    "max_output_tokens": 65536,
+                }
+            ],
+        }
+
     @app.post("/v1/chat/completions")
     async def chat(request: Request) -> dict[str, Any]:
         payload = await request.json()
         model = payload["model"]
         calls[model] = calls.get(model, 0) + 1
+        delay = payload.get("mock_delay_seconds")
+        if isinstance(delay, int | float) and delay > 0:
+            await asyncio.sleep(delay)
         messages = payload.get("messages") or []
         last = messages[-1]["content"] if messages else ""
         tool_calls = None
@@ -135,7 +175,7 @@ async def main() -> None:
                     "primary": {
                         "url": "http://testserver/v1",
                         "api_key": "test",
-                        "model_name": "primary",
+                        "model_name": "glm-5.2",
                     },
                     "aux": [
                         {
@@ -158,9 +198,38 @@ async def main() -> None:
         startup_text = startup_usage_text(config, host="0.0.0.0", port=8082)
         assert "base_url: http://127.0.0.1:8082/v1" in startup_text
         assert "api_key: fusion-panel" in startup_text
-        assert "model: fusion-panel" in startup_text
+        assert "model: glus" in startup_text
         assert client_api_key_from_headers({"authorization": "Bearer fusion-panel"}) == "fusion-panel"
         assert client_api_key_from_headers({"x-api-key": "fusion-panel"}) == "fusion-panel"
+
+        fusion_app = build_app(config)
+        fusion_transport = httpx.ASGITransport(app=fusion_app)
+        async with original_client(
+            transport=fusion_transport,
+            base_url="http://fusion",
+            headers={"Authorization": "Bearer fusion-panel"},
+        ) as client:
+            models_response = await client.get("/v1/models")
+            assert models_response.status_code == 200
+            models = models_response.json()
+            assert models["object"] == "list"
+            assert models["data"][0]["id"] == "glus"
+            assert models["data"][0]["object"] == "model"
+            assert models["data"][0]["created"] == 123
+            assert models["data"][0]["owned_by"] == "primary-owner"
+            assert models["data"][0]["context_window"] == 262144
+            assert models["data"][0]["context_length"] == 262144
+            assert models["data"][0]["max_context_tokens"] == 262144
+            assert models["data"][0]["max_output_tokens"] == 65536
+            assert models["data"][0]["supports_tools"] is True
+            assert models["data"][0]["supports_reasoning"] is True
+            assert "root" not in models["data"][0]
+            assert "parent" not in models["data"][0]
+            model_response = await client.get("/v1/models/glus")
+            assert model_response.status_code == 200
+            assert model_response.json()["id"] == "glus"
+            missing_model_response = await client.get("/v1/models/fusion-panel")
+            assert missing_model_response.status_code == 404
 
         engine = FusionEngine(config)
         result = await engine.run(
@@ -174,6 +243,17 @@ async def main() -> None:
         assert result.debug["mode"] == "judge_integrated_replacement"
         assert result.debug["judge_decision"]["content"]["operation"] == "replace"
         assert "judge_raw" not in result.debug
+        assert result.usage == {
+            "prompt_tokens": 1,
+            "completion_tokens": 1,
+            "total_tokens": 2,
+        }
+        assert result.fusion_usage
+        assert result.fusion_usage["prompt_tokens"] == 3
+        assert result.fusion_usage["completion_tokens"] == 3
+        assert result.fusion_usage["total_tokens"] == 6
+        assert result.fusion_usage["public_usage_source"] == "primary"
+        assert len(result.fusion_usage["fusion_calls"]) == 3
         assert result.optimized is True
         optimized_files = list((Path(config.fusion.record_dir) / "optimized").glob("*.json"))
         assert optimized_files
@@ -213,7 +293,7 @@ async def main() -> None:
                 primary=primary,
                 aux=[],
                 judge=None,
-                usage={},
+                usage={"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5},
                 elapsed_ms=30,
             )
 
@@ -227,6 +307,8 @@ async def main() -> None:
         release_stream.set()
         heartbeat_chunks = [chunk async for chunk in heartbeat_stream]
         assert any('"object":"chat.completion.chunk"' in chunk for chunk in heartbeat_chunks)
+        assert '"choices":[]' in heartbeat_chunks[-2]
+        assert '"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}' in heartbeat_chunks[-2]
         assert heartbeat_chunks[-1] == "data: [DONE]\n\n"
 
         config_all_aux_fail = AppConfig.model_validate(
@@ -279,6 +361,48 @@ async def main() -> None:
         assert stats["fusion_optimized_requests"] == 1
         assert stats["fusion_no_change_requests"] == 1
         assert stats["optimization_rate_fusion_percent"] == 50.0
+
+        slow_aux_config = AppConfig.model_validate(
+            {
+                "fusion": {
+                    "aux_timeout_primary_multiplier": 2.0,
+                },
+                "models": {
+                    "primary": {
+                        "url": "http://testserver/v1",
+                        "api_key": "test",
+                        "model_name": "primary",
+                        "extra_body": {"mock_delay_seconds": 0.02},
+                    },
+                    "aux": [
+                        {
+                            "name": "slow-aux",
+                            "url": "http://testserver/v1",
+                            "api_key": "test",
+                            "model_name": "aux",
+                            "temperature": 0,
+                            "extra_body": {"mock_delay_seconds": 0.2},
+                        }
+                    ],
+                    "judge": {
+                        "url": "http://testserver/v1",
+                        "api_key": "test",
+                        "model_name": "judge",
+                        "temperature": 0,
+                    },
+                },
+            }
+        )
+        judge_calls_before = mock_app.state.calls.get("judge", 0)
+        slow_aux_result = await FusionEngine(slow_aux_config).run(
+            {"messages": [{"role": "user", "content": "slow aux"}]}
+        )
+        assert slow_aux_result.debug["mode"] == "primary_passthrough_no_usable_aux"
+        assert slow_aux_result.degraded is True
+        assert slow_aux_result.errors
+        assert "slow-aux" in slow_aux_result.errors[0]
+        assert "timed out" in slow_aux_result.errors[0]
+        assert mock_app.state.calls.get("judge", 0) == judge_calls_before
 
         config_primary_fail = AppConfig.model_validate(
             {

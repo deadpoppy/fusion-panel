@@ -35,6 +35,7 @@ class FusionResult:
     errors: list[str] | None = None
     optimized: bool = False
     judge_decision: dict[str, Any] | None = None
+    fusion_usage: dict[str, Any] | None = None
 
 
 class FusionEngine:
@@ -60,12 +61,14 @@ class FusionEngine:
                     model,
                     payload,
                     timeout_seconds=self.config.fusion.panel_timeout_seconds,
-                )
+                ),
+                name=f"aux:{model.display_name}",
             )
             for model in self.config.models.aux
         ]
 
         primary = await primary_task
+        primary_elapsed = time.perf_counter() - start
         if primary.error:
             for task in aux_tasks:
                 task.cancel()
@@ -83,7 +86,8 @@ class FusionEngine:
                 primary=primary,
                 aux=[],
                 judge=None,
-                usage=self._usage(primary, []),
+                usage=self._primary_usage(primary),
+                fusion_usage=self._fusion_usage(primary, []),
                 elapsed_ms=elapsed_ms,
                 degraded=True,
                 errors=[f"primary: {primary.error}"],
@@ -109,7 +113,8 @@ class FusionEngine:
                 primary=primary,
                 aux=[],
                 judge=None,
-                usage=self._usage(primary, []),
+                usage=self._primary_usage(primary),
+                fusion_usage=self._fusion_usage(primary, []),
                 elapsed_ms=elapsed_ms,
                 degraded=False,
                 optimized=False,
@@ -133,7 +138,8 @@ class FusionEngine:
                 primary=primary,
                 aux=[],
                 judge=None,
-                usage=self._usage(primary, []),
+                usage=self._primary_usage(primary),
+                fusion_usage=self._fusion_usage(primary, []),
                 elapsed_ms=elapsed_ms,
                 degraded=False,
                 optimized=False,
@@ -141,7 +147,11 @@ class FusionEngine:
             await self._record_result(payload, result, request_kind="fusion")
             return result
 
-        aux = await asyncio.gather(*aux_tasks) if aux_tasks else []
+        aux, timed_out_aux = await self._collect_aux_after_primary(
+            aux_tasks,
+            primary_elapsed_seconds=primary_elapsed,
+        )
+        errors.extend(timed_out_aux)
         usable_aux: list[ModelResult] = []
         for result in aux:
             if result.error:
@@ -157,12 +167,16 @@ class FusionEngine:
                     "mode": "primary_passthrough_no_usable_aux",
                     "skipped_judge": True,
                     "aux_errors": errors,
+                    "aux_timeout_primary_multiplier": (
+                        self.config.fusion.aux_timeout_primary_multiplier
+                    ),
                     "optimized": False,
                 },
                 primary=primary,
                 aux=[],
                 judge=None,
-                usage=self._usage(primary, []),
+                usage=self._primary_usage(primary),
+                fusion_usage=self._fusion_usage(primary, []),
                 elapsed_ms=elapsed_ms,
                 degraded=True,
                 errors=errors or None,
@@ -243,7 +257,12 @@ class FusionEngine:
             primary=primary,
             aux=usable_aux,
             judge=None if judge.error else judge,
-            usage=self._usage(primary, usable_aux, None if judge.error else judge),
+            usage=self._primary_usage(primary),
+            fusion_usage=self._fusion_usage(
+                primary,
+                usable_aux,
+                None if judge.error else judge,
+            ),
             elapsed_ms=elapsed_ms,
             degraded=degraded,
             errors=errors or None,
@@ -271,7 +290,8 @@ class FusionEngine:
                 primary=primary,
                 aux=[],
                 judge=None,
-                usage=self._usage(primary, []),
+                usage=self._primary_usage(primary),
+                fusion_usage=self._fusion_usage(primary, []),
                 elapsed_ms=int((time.perf_counter() - start) * 1000),
                 degraded=True,
                 errors=[f"primary: {primary.error}"],
@@ -286,7 +306,8 @@ class FusionEngine:
             primary=primary,
             aux=[],
             judge=None,
-            usage=self._usage(primary, []),
+            usage=self._primary_usage(primary),
+            fusion_usage=self._fusion_usage(primary, []),
             elapsed_ms=int((time.perf_counter() - start) * 1000),
             optimized=False,
             judge_decision=None,
@@ -324,6 +345,45 @@ class FusionEngine:
                     error=str(exc),
                 )
 
+    async def _collect_aux_after_primary(
+        self,
+        aux_tasks: list[asyncio.Task[ModelResult]],
+        *,
+        primary_elapsed_seconds: float,
+    ) -> tuple[list[ModelResult], list[str]]:
+        if not aux_tasks:
+            return [], []
+
+        multiplier = max(0.0, self.config.fusion.aux_timeout_primary_multiplier)
+        deadline_seconds = primary_elapsed_seconds * multiplier
+        remaining_seconds = max(0.0, deadline_seconds - primary_elapsed_seconds)
+
+        done, pending = await asyncio.wait(
+            aux_tasks,
+            timeout=remaining_seconds,
+        )
+        errors: list[str] = []
+        for task in pending:
+            task.cancel()
+        if pending:
+            timed_out_names = sorted(
+                task.get_name().removeprefix("aux:")
+                for task in pending
+            )
+            await asyncio.gather(*pending, return_exceptions=True)
+            errors.append(
+                f"aux {timed_out_names}: timed out after primary_elapsed_x{multiplier:g} "
+                f"({int(deadline_seconds * 1000)} ms)"
+            )
+
+        results: list[ModelResult] = []
+        for task in done:
+            try:
+                results.append(task.result())
+            except Exception as exc:
+                errors.append(f"aux: {exc}")
+        return results, errors
+
     def _primary_passthrough_message(
         self,
         primary: ModelResult,
@@ -335,7 +395,15 @@ class FusionEngine:
             primary_trajectory=primary.trajectory(),
         )
 
-    def _usage(
+    def _primary_usage(self, primary: ModelResult) -> dict[str, Any]:
+        usage = primary.usage or {}
+        return {
+            "prompt_tokens": usage.get("prompt_tokens", 0),
+            "completion_tokens": usage.get("completion_tokens", 0),
+            "total_tokens": usage.get("total_tokens", 0),
+        }
+
+    def _fusion_usage(
         self,
         primary: ModelResult,
         aux: list[ModelResult],
@@ -369,6 +437,7 @@ class FusionEngine:
 
         return {
             **aggregate,
+            "public_usage_source": "primary",
             "fusion_calls": details,
         }
 
@@ -409,6 +478,8 @@ class FusionEngine:
                 "display_name": result.judge.display_name if result.judge else None,
                 "decision": result.judge_decision,
             },
+            "usage": result.usage,
+            "fusion_usage": result.fusion_usage,
             "enhanced": sanitize_trajectory(result.message),
         }
         path.write_text(json.dumps(data, ensure_ascii=False, indent=2))
@@ -508,6 +579,8 @@ class FusionEngine:
                 "display_name": result.judge.display_name if result.judge else None,
                 "decision": result.judge_decision,
             },
+            "usage": result.usage,
+            "fusion_usage": result.fusion_usage,
             "enhanced": sanitize_trajectory(result.message),
         }
         self._write_json(path, data)
