@@ -24,6 +24,7 @@ class ModelResult:
     url: str
     display_name: str
     latency_ms: int
+    finish_reason: str | None = None
     usage: dict[str, Any] | None = None
     error: str | None = None
 
@@ -34,6 +35,8 @@ class ModelResult:
         }
         if self.tool_calls:
             message["tool_calls"] = self.tool_calls
+        if self.finish_reason:
+            message["finish_reason"] = self.finish_reason
         return message
 
 
@@ -74,9 +77,11 @@ class OpenAICompatibleClient:
 
         data = response.json()
         try:
-            message = data["choices"][0]["message"]
+            choice = data["choices"][0]
+            message = choice["message"]
         except (KeyError, IndexError, TypeError) as exc:
             raise UpstreamError(f"Malformed upstream response: {data}") from exc
+        finish_reason = choice.get("finish_reason")
 
         return ModelResult(
             role=message.get("role", "assistant"),
@@ -88,6 +93,7 @@ class OpenAICompatibleClient:
             url=url,
             display_name=self.model_config.display_name,
             latency_ms=latency_ms,
+            finish_reason=finish_reason if isinstance(finish_reason, str) else None,
             usage=data.get("usage"),
         )
 

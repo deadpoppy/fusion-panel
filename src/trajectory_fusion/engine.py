@@ -147,6 +147,32 @@ class FusionEngine:
             await self._record_result(payload, result, request_kind="fusion")
             return result
 
+        if primary.finish_reason == "stop" and not primary.tool_calls:
+            for task in aux_tasks:
+                task.cancel()
+            if aux_tasks:
+                await asyncio.gather(*aux_tasks, return_exceptions=True)
+            elapsed_ms = int((time.perf_counter() - start) * 1000)
+            result = FusionResult(
+                message=self._primary_passthrough_message(primary, payload),
+                debug={
+                    "mode": "primary_passthrough_finished",
+                    "primary_finish_reason": primary.finish_reason,
+                    "skipped_judge": True,
+                    "optimized": False,
+                },
+                primary=primary,
+                aux=[],
+                judge=None,
+                usage=self._primary_usage(primary),
+                fusion_usage=self._fusion_usage(primary, []),
+                elapsed_ms=elapsed_ms,
+                degraded=False,
+                optimized=False,
+            )
+            await self._record_result(payload, result, request_kind="fusion")
+            return result
+
         aux, timed_out_aux = await self._collect_aux_after_primary(
             aux_tasks,
             primary_elapsed_seconds=primary_elapsed,
@@ -186,7 +212,7 @@ class FusionEngine:
 
         tool_names = available_tool_names(payload)
         judge_payload = {
-            "messages": build_judge_messages(payload, primary, usable_aux, tool_names),
+            "messages": build_judge_messages(primary, usable_aux, tool_names),
         }
         if payload.get("tools"):
             judge_payload["tools"] = payload["tools"]

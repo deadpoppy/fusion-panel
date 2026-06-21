@@ -4,13 +4,12 @@ import json
 from typing import Any
 
 from .openai_client import ModelResult
-from .tools import sanitize_trajectory
+from .tools import strip_reasoning_text
 
 
 JUDGE_SYSTEM_PROMPT = """You are the only fusion step in a Primary-Anchored Trajectory Fusion API proxy.
 
-You receive one PRIMARY trajectory from a strong model and several AUXILIARY trajectories
-from weaker, low-temperature models.
+You receive one PRIMARY assistant delta and several AUXILIARY assistant deltas.
 
 Your job is to decide whether the current PRIMARY assistant trajectory already has
 comprehensive enough user-visible information for the thing the PRIMARY is doing
@@ -18,8 +17,8 @@ right now. If it does, return no content change. If it does not, replace the
 PRIMARY assistant content with an integrated version of that same current move.
 
 Do not append addenda to the PRIMARY content. Do not output a separate analysis
-report. Do not output consensus/contradictions/blind-spots lists unless the user's
-requested answer format explicitly requires those labels.
+report. Do not output consensus/contradictions/blind-spots lists unless the
+PRIMARY delta already uses that answer shape.
 
 The PRIMARY trajectory is the anchor:
 - Preserve the PRIMARY trajectory's user-facing intent, format, tone, wording
@@ -45,7 +44,7 @@ Content replacement rules:
   2. contradictions: conflicts that need correction, hedging, or preserving primary;
   3. partial coverage: requirements covered by only some trajectories;
   4. unique insights: useful non-conflicting details found only in one trajectory;
-  5. blind spots: requirements implied by the original request but missed by all trajectories.
+  5. blind spots: requirements implied by the visible current move but missed by all deltas.
 - Ask whether the PRIMARY content has comprehensive cognitive coverage of those
   five lenses. If yes, use "none".
 - If not, use "replace" and write a complete integrated answer in the PRIMARY's
@@ -61,9 +60,10 @@ Content replacement rules:
   settled facts.
 - Do not turn auxiliary-only claims into settled facts. If a useful point comes
   from only one auxiliary trajectory, make its non-consensus status visible in the
-  wording unless it is independently supported by PRIMARY or the original context.
-- Preserve explicit user constraints from the original request, including language,
-  length, format, safety boundaries, and requested level of detail.
+  wording unless it is independently supported by PRIMARY.
+- Preserve explicit user constraints that are visible in the PRIMARY delta,
+  including language, length, format, safety boundaries, and requested level of
+  detail.
 - For ordinary text answers, "replace" text must be a non-empty string.
 
 How to express five-lens information in a replacement:
@@ -122,37 +122,24 @@ def dumps_json(data: Any) -> str:
     return json.dumps(data, ensure_ascii=False, indent=2)
 
 
-def model_result_for_prompt(result: ModelResult, label: str) -> dict[str, Any]:
-    return {
-        "label": label,
-        "model": result.model,
-        "display_name": result.display_name,
-        "trajectory": sanitize_trajectory(result.trajectory()),
-        "error": result.error,
+def delta_for_prompt(result: ModelResult) -> dict[str, Any]:
+    delta: dict[str, Any] = {
+        "content": strip_reasoning_text(result.content),
     }
+    if result.tool_calls:
+        delta["tool_calls"] = result.tool_calls
+    return delta
 
 
 def build_judge_messages(
-    request_payload: dict[str, Any],
     primary: ModelResult,
     aux_results: list[ModelResult],
     available_tool_names: list[str],
 ) -> list[dict[str, Any]]:
-    trajectories = {
-        "primary": model_result_for_prompt(primary, "PRIMARY"),
-        "auxiliary": [
-            model_result_for_prompt(result, result.display_name)
-            for result in aux_results
-        ],
-    }
     content = {
-        "original_request": {
-            "messages": request_payload.get("messages", []),
-            "tools": request_payload.get("tools"),
-            "tool_choice": request_payload.get("tool_choice"),
-            "available_tool_names": available_tool_names,
-        },
-        "trajectories": trajectories,
+        "available_tool_names": available_tool_names,
+        "primary_delta": delta_for_prompt(primary),
+        "auxiliary_deltas": [delta_for_prompt(result) for result in aux_results],
     }
     return [
         {"role": "system", "content": JUDGE_SYSTEM_PROMPT},

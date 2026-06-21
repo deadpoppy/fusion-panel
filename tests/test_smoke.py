@@ -142,10 +142,21 @@ def upstream_app() -> FastAPI:
         if tool_calls:
             message["tool_calls"] = tool_calls
 
+        finish_reason = payload.get(
+            "mock_finish_reason",
+            "tool_calls" if tool_calls else "stop",
+        )
+
         return {
             "id": "mock",
             "object": "chat.completion",
-            "choices": [{"index": 0, "message": message, "finish_reason": "tool_calls" if tool_calls else "stop"}],
+            "choices": [
+                {
+                    "index": 0,
+                    "message": message,
+                    "finish_reason": finish_reason,
+                }
+            ],
             "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
         }
 
@@ -176,6 +187,7 @@ async def main() -> None:
                         "url": "http://testserver/v1",
                         "api_key": "test",
                         "model_name": "glm-5.2",
+                        "extra_body": {"mock_finish_reason": "length"},
                     },
                     "aux": [
                         {
@@ -271,6 +283,44 @@ async def main() -> None:
         assert stats["fusion_optimized_requests"] == 1
         assert stats["optimization_rate_fusion_percent"] == 100.0
 
+        primary_stop_config = AppConfig.model_validate(
+            {
+                "models": {
+                    "primary": {
+                        "url": "http://testserver/v1",
+                        "api_key": "test",
+                        "model_name": "primary",
+                    },
+                    "aux": [
+                        {
+                            "name": "aux",
+                            "url": "http://testserver/v1",
+                            "api_key": "test",
+                            "model_name": "aux",
+                            "temperature": 0,
+                        }
+                    ],
+                    "judge": {
+                        "url": "http://testserver/v1",
+                        "api_key": "test",
+                        "model_name": "judge",
+                        "temperature": 0,
+                    },
+                },
+            }
+        )
+        judge_calls_before = mock_app.state.calls.get("judge", 0)
+        primary_stop_result = await FusionEngine(primary_stop_config).run(
+            {"messages": [{"role": "user", "content": "already final"}]}
+        )
+        assert primary_stop_result.message["content"] == "primary saw: already final"
+        assert primary_stop_result.debug["mode"] == "primary_passthrough_finished"
+        assert primary_stop_result.debug["primary_finish_reason"] == "stop"
+        assert primary_stop_result.optimized is False
+        assert primary_stop_result.primary.finish_reason == "stop"
+        assert primary_stop_result.primary.trajectory()["finish_reason"] == "stop"
+        assert mock_app.state.calls.get("judge", 0) == judge_calls_before
+
         release_stream = asyncio.Event()
 
         async def blocked_result() -> FusionResult:
@@ -321,6 +371,7 @@ async def main() -> None:
                         "url": "http://testserver/v1",
                         "api_key": "test",
                         "model_name": "primary",
+                        "extra_body": {"mock_finish_reason": "length"},
                     },
                     "aux": [
                         {
@@ -372,7 +423,10 @@ async def main() -> None:
                         "url": "http://testserver/v1",
                         "api_key": "test",
                         "model_name": "primary",
-                        "extra_body": {"mock_delay_seconds": 0.02},
+                        "extra_body": {
+                            "mock_delay_seconds": 0.02,
+                            "mock_finish_reason": "length",
+                        },
                     },
                     "aux": [
                         {
@@ -444,6 +498,7 @@ async def main() -> None:
                         "url": "http://testserver/v1",
                         "api_key": "test",
                         "model_name": "primary",
+                        "extra_body": {"mock_finish_reason": "length"},
                     },
                     "aux": [
                         {
@@ -479,6 +534,7 @@ async def main() -> None:
                         "url": "http://testserver/v1",
                         "api_key": "test",
                         "model_name": "reasoning-primary",
+                        "extra_body": {"mock_finish_reason": "length"},
                     },
                     "aux": [
                         {
@@ -569,7 +625,6 @@ async def main() -> None:
         assert strip_reasoning_text("<think>x</think>\nShown") == "Shown"
 
         judge_messages = build_judge_messages(
-            {"messages": [{"role": "user", "content": "review"}]},
             ModelResult(
                 role="assistant",
                 content="<think>hidden primary</think>\nPrimary visible",
@@ -594,13 +649,29 @@ async def main() -> None:
                     latency_ms=1,
                 )
             ],
-            [],
+            ["read"],
         )
         judge_payload_text = judge_messages[-1]["content"]
+        judge_payload = json.loads(judge_payload_text)
         assert "hidden primary" not in judge_payload_text
         assert "hidden aux" not in judge_payload_text
         assert "Primary visible" in judge_payload_text
         assert "Aux visible" in judge_payload_text
+        assert judge_payload == {
+            "available_tool_names": ["read"],
+            "primary_delta": {"content": "Primary visible"},
+            "auxiliary_deltas": [{"content": "Aux visible"}],
+        }
+        assert "review" not in judge_payload_text
+        assert "assistant" not in judge_payload_text
+        assert '"model": "primary"' not in judge_payload_text
+        assert '"display_name": "primary"' not in judge_payload_text
+        assert '"model": "aux"' not in judge_payload_text
+        assert '"display_name": "aux"' not in judge_payload_text
+        assert "display_name" not in judge_payload_text
+        assert "model" not in judge_payload_text
+        assert "label" not in judge_payload_text
+        assert "error" not in judge_payload_text
         assert "current stage of work" in JUDGE_SYSTEM_PROMPT
         assert "non-consensus status visible" in JUDGE_SYSTEM_PROMPT
         assert "How to express five-lens information" in JUDGE_SYSTEM_PROMPT
@@ -628,6 +699,7 @@ async def main() -> None:
                         "url": "http://testserver/v1",
                         "api_key": "test",
                         "model_name": "primary",
+                        "extra_body": {"mock_finish_reason": "length"},
                     },
                     "aux": [
                         {
